@@ -1,0 +1,103 @@
+name: Bangun APK
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      suara:
+        description: 'Sertakan input suara (matikan kalau build gagal)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      APP_ID: com.alhan.milikkitabersama
+      APP_NAME: Milik Kita Bersama
+      WITH_VOICE: ${{ github.event_name == 'push' && 'true' || inputs.suara }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Siapkan proyek Android
+        run: |
+          mkdir -p www && cp index.html www/
+          npm init -y > /dev/null
+          npm i @capacitor/core@8 @capacitor/cli@8 @capacitor/android@8
+          if [ "$WITH_VOICE" = "true" ]; then npm i @capacitor-community/speech-recognition@7; fi
+          npx cap init "$APP_NAME" "$APP_ID" --web-dir www
+          npx cap add android
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then VER="${GITHUB_REF_NAME#v}"; else VER="0.0.$GITHUB_RUN_NUMBER"; fi
+          sed -i "s/versionCode 1/versionCode $GITHUB_RUN_NUMBER/; s/versionName \"1.0\"/versionName \"$VER\"/" android/app/build.gradle
+
+      - name: Buat ikon aplikasi
+        run: |
+          npm i --no-save sharp
+          cat > make-icons.cjs <<'EOF2'
+          const sharp = require('sharp');
+          const fs = require('fs');
+          const res = 'android/app/src/main/res/';
+          const D = { mdpi: 1, hdpi: 1.5, xhdpi: 2, xxhdpi: 3, xxxhdpi: 4 };
+          const logo = (S, w) => '<g transform="translate(' + S / 2 + ' ' + S / 2 + ') scale(' + w / 48 + ') translate(-32 -32)">'
+            + '<circle cx="24" cy="32" r="16" fill="#2DD4A7"/><circle cx="40" cy="32" r="16" fill="#F5B544"/>'
+            + '<path d="M32 18.14A16 16 0 0 0 32 45.86A16 16 0 0 0 32 18.14Z" fill="#FFF6DD"/></g>';
+          const svg = (S, inner) => Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="' + S + '" height="' + S + '" viewBox="0 0 ' + S + ' ' + S + '">' + inner + '</svg>');
+          (async () => {
+            for (const [d, k] of Object.entries(D)) {
+              const L = Math.round(48 * k), F = Math.round(108 * k), dir = res + 'mipmap-' + d + '/';
+              await sharp(svg(F, logo(F, F * 0.56))).png().toFile(dir + 'ic_launcher_foreground.png');
+              await sharp(svg(L, '<rect width="' + L + '" height="' + L + '" rx="' + L * 0.22 + '" fill="#0B3B31"/>' + logo(L, L * 0.62))).png().toFile(dir + 'ic_launcher.png');
+              await sharp(svg(L, '<circle cx="' + L / 2 + '" cy="' + L / 2 + '" r="' + L / 2 + '" fill="#0B3B31"/>' + logo(L, L * 0.56))).png().toFile(dir + 'ic_launcher_round.png');
+            }
+            fs.writeFileSync(res + 'values/ic_launcher_background.xml', '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#0B3B31</color>\n</resources>\n');
+          })();
+          EOF2
+          node make-icons.cjs
+          sed -i 's#@drawable/splash#@color/ic_launcher_background#' android/app/src/main/res/values/styles.xml
+          npx cap sync android
+
+      - name: Pakai kunci tanda tangan sendiri (opsional)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            mkdir -p ~/.android
+            echo "$KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+          else
+            echo "Tidak ada KEYSTORE_BASE64. APK memakai kunci acak, jadi pembaruan harus dengan hapus dulu aplikasi lama."
+          fi
+
+      - name: Bangun APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          yes | sdkmanager --licenses > /dev/null || true
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Ganti nama APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk MilikKitaBersama.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MilikKitaBersama
+          path: MilikKitaBersama.apk
+
+      - name: Terbitkan di Releases
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MilikKitaBersama.apk
+          generate_release_notes: true
